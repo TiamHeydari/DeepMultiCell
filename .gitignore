@@ -17,7 +17,6 @@ venv/
 *.loom
 *.pkl
 *.pickle
-*.pt
 *.pth
 *.npz
 *.npy
