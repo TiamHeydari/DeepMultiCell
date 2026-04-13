@@ -25,9 +25,6 @@ venv/
 *.tar
 *.gz
 
-# data folders
-data/
-*/data/
 
 # misc
 .DS_Store
