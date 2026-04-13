@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# environments
+.env
+venv/
+.venv/
+
+# large scientific data
+*.h5ad
+*.h5
+*.hdf5
+*.rds
+*.RDS
+*.loom
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.npz
+*.npy
+*.zip
+*.tar
+*.gz
+
+# data folders
+data/
+*/data/
+
+# misc
+.DS_Store
