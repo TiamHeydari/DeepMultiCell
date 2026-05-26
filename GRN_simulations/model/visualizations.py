@@ -195,22 +195,6 @@ def umap_and_highlight_classes(
 
 
 
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
-
-# -----------------------------
-# Latent collection
-# -----------------------------
-model_for_latent = model if ("model" in globals() and hasattr(model, "eval")) else model_test
-
-Z_train, y_train = collect_all_sets_z(model_for_latent, train_loader, device)
-Z_val,   y_val   = collect_all_sets_z(model_for_latent, valid_loader, device)
-Z_test,  y_test  = collect_all_sets_z(model_for_latent, test_loader, device)
-Z_ood,   y_ood   = collect_all_sets_z(model_for_latent, ood_loader, device)
-
 # -----------------------------
 # PCA helpers
 # -----------------------------
