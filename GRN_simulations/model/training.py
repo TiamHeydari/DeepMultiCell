@@ -69,6 +69,34 @@ def hungarian_loss(x_hat, x, p=2):
     return torch.stack(batch_losses).mean()
 
 
+def moment_loss(x_hat, x, eps=1e-8):
+    """
+    Match mean, variance, and covariance of each colony.
+
+    x_hat : (B, N, C)
+    x     : (B, N, C)
+    """
+    mean_hat = x_hat.mean(dim=1)
+    mean_true = x.mean(dim=1)
+
+    centered_hat = x_hat - mean_hat[:, None, :]
+    centered_true = x - mean_true[:, None, :]
+
+    var_hat = centered_hat.var(dim=1, unbiased=False)
+    var_true = centered_true.var(dim=1, unbiased=False)
+
+    B, N, C = x.shape
+
+    cov_hat = torch.matmul(centered_hat.transpose(1, 2), centered_hat) / (N + eps)
+    cov_true = torch.matmul(centered_true.transpose(1, 2), centered_true) / (N + eps)
+
+    loss_mean = F.mse_loss(mean_hat, mean_true)
+    loss_var = F.mse_loss(var_hat, var_true)
+    loss_cov = F.mse_loss(cov_hat, cov_true)
+
+    return loss_mean + loss_var + loss_cov
+
+
 def reconstruction_loss(
     x_hat,
     x,
@@ -76,24 +104,31 @@ def reconstruction_loss(
     p_sinkhorn=2,
     p_hungarian=2,
     lambda_hungarian=0.0,
+    lambda_moment=0.0,
 ):
     """
     Combined reconstruction loss:
-        Sinkhorn + lambda_hungarian * Hungarian
+        Sinkhorn + lambda_hungarian * Hungarian + lambda_moment * Moment
 
     IMPORTANT:
     If lambda_hungarian == 0, Hungarian is not computed at all.
+    If lambda_moment == 0, Moment loss is not computed at all.
     """
     loss_sink = sinkhorn_loss(x_hat, x, blur=blur, p=p_sinkhorn)
 
     if lambda_hungarian > 0.0:
         loss_hung = hungarian_loss(x_hat, x, p=p_hungarian)
-        loss_recon = loss_sink + lambda_hungarian * loss_hung
     else:
         loss_hung = torch.zeros((), device=x_hat.device, dtype=x_hat.dtype)
-        loss_recon = loss_sink
 
-    return loss_recon, loss_sink, loss_hung
+    if lambda_moment > 0.0:
+        loss_mom = moment_loss(x_hat, x)
+    else:
+        loss_mom = torch.zeros((), device=x_hat.device, dtype=x_hat.dtype)
+
+    loss_recon = loss_sink + lambda_hungarian * loss_hung + lambda_moment * loss_mom
+
+    return loss_recon, loss_sink, loss_hung, loss_mom
 
 
 # =========================================================
@@ -179,11 +214,13 @@ def train_epoch(
     beta=1e-3,
     blur=0.5,
     lambda_hungarian=0.0,
+    lambda_moment=0.0,
 ):
     train_loss_ep = 0.0
     train_recon_ep = 0.0
     train_sink_ep = 0.0
     train_hung_ep = 0.0
+    train_mom_ep = 0.0
     train_kl_ep = 0.0
 
     model.train()
@@ -194,13 +231,14 @@ def train_epoch(
 
         x_hat, z, mu, logvar = model(data)
 
-        recon_loss, sink_loss, hung_loss = reconstruction_loss(
+        recon_loss, sink_loss, hung_loss, mom_loss = reconstruction_loss(
             x_hat=x_hat,
             x=data,
             blur=blur,
             p_sinkhorn=2,
             p_hungarian=2,
             lambda_hungarian=lambda_hungarian,
+            lambda_moment=lambda_moment,
         )
 
         std = torch.exp(0.5 * logvar)
@@ -217,6 +255,7 @@ def train_epoch(
         train_recon_ep += recon_loss.item() * batch_size
         train_sink_ep += sink_loss.item() * batch_size
         train_hung_ep += hung_loss.item() * batch_size
+        train_mom_ep += mom_loss.item() * batch_size
         train_kl_ep += kl_loss.item() * batch_size
 
     n_samples = len(train_loader.dataset)
@@ -224,9 +263,10 @@ def train_epoch(
     train_recon_ep /= n_samples
     train_sink_ep /= n_samples
     train_hung_ep /= n_samples
+    train_mom_ep /= n_samples
     train_kl_ep /= n_samples
 
-    return train_loss_ep, train_recon_ep, train_sink_ep, train_hung_ep, train_kl_ep
+    return train_loss_ep, train_recon_ep, train_sink_ep, train_hung_ep, train_mom_ep, train_kl_ep
 
 
 @torch.no_grad()
@@ -237,11 +277,13 @@ def eval_epoch(
     beta=1e-3,
     blur=0.5,
     lambda_hungarian=0.0,
+    lambda_moment=0.0,
 ):
     valid_loss_ep = 0.0
     valid_recon_ep = 0.0
     valid_sink_ep = 0.0
     valid_hung_ep = 0.0
+    valid_mom_ep = 0.0
     valid_kl_ep = 0.0
 
     model.eval()
@@ -250,13 +292,14 @@ def eval_epoch(
         data = batch["point"].to(device)
         x_hat, z, mu, logvar = model(data)
 
-        recon_loss, sink_loss, hung_loss = reconstruction_loss(
+        recon_loss, sink_loss, hung_loss, mom_loss = reconstruction_loss(
             x_hat=x_hat,
             x=data,
             blur=blur,
             p_sinkhorn=2,
             p_hungarian=2,
             lambda_hungarian=lambda_hungarian,
+            lambda_moment=lambda_moment,
         )
 
         std = torch.exp(0.5 * logvar)
@@ -271,6 +314,7 @@ def eval_epoch(
         valid_recon_ep += recon_loss.item() * batch_size
         valid_sink_ep += sink_loss.item() * batch_size
         valid_hung_ep += hung_loss.item() * batch_size
+        valid_mom_ep += mom_loss.item() * batch_size
         valid_kl_ep += kl_loss.item() * batch_size
 
     n_samples = len(loader.dataset)
@@ -278,9 +322,10 @@ def eval_epoch(
     valid_recon_ep /= n_samples
     valid_sink_ep /= n_samples
     valid_hung_ep /= n_samples
+    valid_mom_ep /= n_samples
     valid_kl_ep /= n_samples
 
-    return valid_loss_ep, valid_recon_ep, valid_sink_ep, valid_hung_ep, valid_kl_ep
+    return valid_loss_ep, valid_recon_ep, valid_sink_ep, valid_hung_ep, valid_mom_ep, valid_kl_ep
 
 
 # =========================================================
@@ -301,6 +346,9 @@ def fit_model(
     lambda_hungarian_max=0.1,
     hungarian_start_fraction=0.2,   # default: first 20% only Sinkhorn
     hungarian_ramp_fraction=0.3,    # then ramp Hungarian
+    lambda_moment_max=0.0,           # moment loss weight, default 0 (disabled)
+    moment_start_fraction=0.5,       # when to start ramping moment loss
+    moment_ramp_fraction=0.3,        # how long to ramp moment loss
     model_path="model.pt",
     factor=0.5,
     patience=3,
@@ -316,15 +364,18 @@ def fit_model(
     history = {
         "betas": [],
         "lambda_hungarians": [],
+        "lambda_moments": [],
         "train_losses": [],
         "train_recon_losses": [],
         "train_sink_losses": [],
         "train_hung_losses": [],
+        "train_mom_losses": [],
         "train_kl_losses": [],
         "valid_losses": [],
         "valid_recon_losses": [],
         "valid_sink_losses": [],
         "valid_hung_losses": [],
+        "valid_mom_losses": [],
         "valid_kl_losses": [],
     }
 
@@ -345,10 +396,19 @@ def fit_model(
             hungarian_ramp_fraction=hungarian_ramp_fraction,
         )
 
+        lambda_moment = get_lambda_hungarian(
+            epoch=epoch,
+            n_epochs=n_epochs,
+            lambda_hungarian_max=lambda_moment_max,
+            hungarian_start_fraction=moment_start_fraction,
+            hungarian_ramp_fraction=moment_ramp_fraction,
+        )
+
         history["betas"].append(beta)
         history["lambda_hungarians"].append(lambda_hungarian)
+        history["lambda_moments"].append(lambda_moment)
 
-        train_loss, train_recon, train_sink, train_hung, train_kl = train_epoch(
+        train_loss, train_recon, train_sink, train_hung, train_mom, train_kl = train_epoch(
             model=model,
             device=device,
             train_loader=train_loader,
@@ -356,42 +416,49 @@ def fit_model(
             beta=beta,
             blur=blur,
             lambda_hungarian=lambda_hungarian,
+            lambda_moment=lambda_moment,
         )
 
-        valid_loss, valid_recon, valid_sink, valid_hung, valid_kl = eval_epoch(
+        valid_loss, valid_recon, valid_sink, valid_hung, valid_mom, valid_kl = eval_epoch(
             model=model,
             device=device,
             loader=valid_loader,
             beta=beta,
             blur=blur,
             lambda_hungarian=lambda_hungarian,
+            lambda_moment=lambda_moment,
         )
 
         history["train_losses"].append(train_loss)
         history["train_recon_losses"].append(train_recon)
         history["train_sink_losses"].append(train_sink)
         history["train_hung_losses"].append(train_hung)
+        history["train_mom_losses"].append(train_mom)
         history["train_kl_losses"].append(train_kl)
 
         history["valid_losses"].append(valid_loss)
         history["valid_recon_losses"].append(valid_recon)
         history["valid_sink_losses"].append(valid_sink)
         history["valid_hung_losses"].append(valid_hung)
+        history["valid_mom_losses"].append(valid_mom)
         history["valid_kl_losses"].append(valid_kl)
 
         print(
             f"Epoch: {epoch + 1} | "
             f"beta: {beta:.6f} | "
             f"lambda_hungarian: {lambda_hungarian:.6f} | "
+            f"lambda_moment: {lambda_moment:.6f} | "
             f"Train Loss: {train_loss:.6f} | "
             f"Train Recon: {train_recon:.6f} | "
             f"Train Sink: {train_sink:.6f} | "
             f"Train Hung: {train_hung:.6f} | "
+            f"Train Mom: {train_mom:.6f} | "
             f"Train KL: {train_kl:.6f} | "
             f"Valid Loss: {valid_loss:.6f} | "
             f"Valid Recon: {valid_recon:.6f} | "
             f"Valid Sink: {valid_sink:.6f} | "
             f"Valid Hung: {valid_hung:.6f} | "
+            f"Valid Mom: {valid_mom:.6f} | "
             f"Valid KL: {valid_kl:.6f}"
         )
 
@@ -459,6 +526,15 @@ def plot_training_history(history):
     plt.show()
 
     plt.figure(figsize=(6, 4))
+    plt.plot(epochs, history["train_mom_losses"], label="Train Moment")
+    plt.plot(epochs, history["valid_mom_losses"], label="Validation Moment")
+    plt.xlabel("Epoch")
+    plt.ylabel("Moment Loss")
+    plt.title("Moment Loss")
+    plt.legend()
+    plt.show()
+
+    plt.figure(figsize=(6, 4))
     plt.plot(epochs, history["train_kl_losses"], label="Train KL loss")
     plt.plot(epochs, history["valid_kl_losses"], label="Validation KL loss")
     plt.xlabel("Epoch")
@@ -480,5 +556,13 @@ def plot_training_history(history):
     plt.xlabel("Epoch")
     plt.ylabel("Hungarian Weight")
     plt.title("Hungarian Weight Schedule")
+    plt.legend()
+    plt.show()
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(epochs, history["lambda_moments"], label="lambda_moment")
+    plt.xlabel("Epoch")
+    plt.ylabel("Moment Weight")
+    plt.title("Moment Weight Schedule")
     plt.legend()
     plt.show()
